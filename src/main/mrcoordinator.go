@@ -14,6 +14,7 @@ import "time"
 import "os"
 import "fmt"
 
+// go build $RACE mrcoordinator.go && ./mrcoordinator ./../mrapps/wc.so ./pg*txt
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
