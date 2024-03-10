@@ -76,16 +76,14 @@ type Raft struct {
 	RequestAppendEntriesTimeTicker *time.Ticker // rpc循环计时器，leader才有
 	RequestAppendEntriesDuration   time.Duration
 
-	// ld中待确认的日志，需要发给所有follower确认，当超过一半确认后，当做确认完毕，转移到待提交队列
-
-	Log         []LogEntry // 日志   第一个下标为1而不是0
+	Log         []LogEntry // 日志数组   在语义上第一个下标为1而不是0
 	CommitIndex int        // 已经提交的最大的日志index， 初始化为0
 
 	ApplyCh     chan ApplyMsg // 检测程序所用，提交之后的日志发送到这里
-	LastApplied int           // 最后一个被应用到[完成提交]状态机的日志下标, 实验里面用不到
+	LastApplied int           // 最后一个被应用到[完成提交]状态机的日志下标, 实验2B用不到
 
-	NextIndex  []int // leader才有。对于各个raft节点，下一个需要接收的日志条目的索引，初始化为自己最后一个log的下标+1
-	MatchIndex []int // leader才有。对于各个raft节点，已经复制过去的最高的日志下标【正常是从1开始，所以这里初始化是0】
+	NextIndex  []int // leader才有意义。对于各个raft节点，下一个需要接收的日志条目的索引，初始化为自己最后一个log的下标+1
+	MatchIndex []int // leader才有意义。对于各个raft节点，已经复制过去的最高的日志下标【正常是从1开始，所以这里初始化是0】
 
 	// 实验2D
 	LastIncludedTerm  int64 // 最后快照保存的term
@@ -99,11 +97,11 @@ const (
 	RoleLeader              = 3
 	InitVoteFor             = -1                     // 初始化投票为空
 	InitTerm                = 1                      // 初始化任期
-	BaseRPCCyclePeriod      = 40 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~20毫秒的随机值
-	BaseElectionCyclePeriod = 400 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~200毫秒的随机值
+	BaseRPCCyclePeriod      = 20 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~ RPCRandomPeriod 毫秒的随机值
+	BaseElectionCyclePeriod = 200 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~ ElectionRandomPeriod 毫秒的随机值
 
-	RPCRandomPeriod      = 20
-	ElectionRandomPeriod = 200
+	RPCRandomPeriod      = 10
+	ElectionRandomPeriod = 100
 )
 
 // GlobalID 全局自增ID，需要原子性自增，用于debug
@@ -121,6 +119,7 @@ type AppendEntriesRequest struct {
 	Term         int64 // 自己这里维护的任期
 	ServerNumber int32 // 我是哪台机器, 编号 [0,n)   实际上就是leader的编号
 
+	// 2B、2C
 	PrevLogIndex      int        // Leader节点认为该Follower节点已有的上一条日志条目的索引,从0开始
 	PrevLogTerm       int64      // PrevLogIndex 的任期
 	LeaderCommitIndex int        // 自己的 commitIndex 值
@@ -131,9 +130,11 @@ type AppendEntriesRequest struct {
 type AppendEntriesReply struct {
 	Term         int64 // 自己这里维护的任期
 	ServerNumber int32 // 回复一下自己是哪台机器, 编号 [0,n)
-	Success      bool  // 如果跟随者包含与prevLogIndex和prevLogTerm匹配的条目，则为true。
-	MatchIndex   int   // 告诉leader最后一次复制完的日志index
-	HasReplica   bool  // follower是否复制了日志, 仅用于debug打印
+
+	// 2B、2C
+	Success    bool // 如果跟随者包含与prevLogIndex和prevLogTerm匹配的条目，则为true。
+	MatchIndex int  // 告诉leader最后一次复制完的日志index
+	HasReplica bool // follower是否复制了日志, 仅用于debug打印
 }
 
 // SnapshotReq 实验2D，照着论文图13实现
@@ -299,7 +300,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Agree = true
 		return
 	}
-	fmt.Print(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, " 号机器收到 ", args.ServerNumber, " 号机器的投票请求, 自己的任期是 ", rf.Term, " 请求中的任期是", args.Term, " 自己的VotedFor", rf.VotedFor, " LastLogIndex:", args.LastLogIndex, " LastLogTerm:", args.LastLogTerm)
+	//fmt.Print(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, " 号机器收到 ", args.ServerNumber, " 号机器的投票请求, 自己的任期是 ", rf.Term, " 请求中的任期是", args.Term, " 自己的VotedFor", rf.VotedFor, " LastLogIndex:", args.LastLogIndex, " LastLogTerm:", args.LastLogTerm)
 	// 论文原文 If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.Term {
 		rf.convert2Follower(args.Term)
@@ -323,7 +324,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	fmt.Println(" 结果是:", reply.Agree, " logOld:", logOld, "log:", fmt.Sprintf("%+v", rf.Log))
 }
 
-// AsyncBatchSendRequestVote 领导者并行发送投票请求，收到响应后进行处理
+// AsyncBatchSendRequestVote 非领导者并行发送投票请求，收到响应后进行处理
 func (rf *Raft) AsyncBatchSendRequestVote() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -337,7 +338,7 @@ func (rf *Raft) AsyncBatchSendRequestVote() {
 			args.LastLogTerm = rf.Log[len(rf.Log)-1].Term
 		}
 		reply := &RequestVoteReply{}
-		fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器发送选主请求, 发给", index, " 号  自己的信息是:", fmt.Sprintf("%+v", *args))
+		//fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器发送选主请求, 发给", index, " 号  自己的信息是:", fmt.Sprintf("%+v", *args))
 		go func(i int) {
 			if flag := rf.sendRequestVote(i, args, reply); !flag {
 				//  网络原因，需要重发，这里先不实现
@@ -361,7 +362,7 @@ func (rf *Raft) HandleRequestVoteResp(req *RequestVoteArgs, reply *RequestVoteRe
 		rf.convert2Follower(reply.Term)
 		return
 	}
-	fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器收到 ", reply.ServerNumber, " 号机器的投票回复，", reply.Agree, " 自己的Role:", rf.Role)
+	//fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器收到 ", reply.ServerNumber, " 号机器的投票回复，", reply.Agree, " 自己的Role:", rf.Role)
 	if rf.Term == reply.Term && rf.Role == RoleCandidate {
 		rf.PeersVoteGranted[reply.ServerNumber] = reply.Agree
 		// 看看是不是同意一半以上了
@@ -376,13 +377,7 @@ func (rf *Raft) HandleRequestVoteResp(req *RequestVoteArgs, reply *RequestVoteRe
 				rf.NextIndex[i] = len(rf.Log) + 1 + rf.LastIncludedIndex
 			}
 			util.Success(fmt.Sprint(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器升级成 leader,任期为", rf.Term))
-			// todo 立马添加一个 no-op 日志。因为图 8 说明即使某日志被复制到多数节点也不代表它被提交。
-			//rf.Log = append(rf.Log, LogEntry{
-			//	Command: nil,
-			//	Index:   len(rf.Log) + 1,
-			//	Term:    rf.Term,
-			//	ID:      atomic.AddInt64(&GlobalID, 1),
-			//})
+			//  根据论文，应该立马添加一个 no-op 日志。因为论文图 8 说明即使某日志被复制到多数节点也不代表它被提交。但这里不需要添加，否则检测不过
 			// 启动 rpc 后台协程
 			go rf.backupGroundRPCCycle()
 		}
@@ -407,6 +402,7 @@ func (rf *Raft) backupGroundRPCCycle() {
 	}
 }
 
+// AsyncBatchSendRequestAppendEntries 异步并行发送多个心跳包
 func (rf *Raft) AsyncBatchSendRequestAppendEntries() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -457,10 +453,6 @@ func (rf *Raft) AsyncBatchSendRequestAppendEntries() {
 		}
 		reply := &AppendEntriesReply{}
 		go func(i int) {
-			//logPrint := fmt.Sprintf("自身log为%+v", rf.Log)
-			//if i%2 == 1 {
-			//	logPrint = ""
-			//}
 			//util.Trace(fmt.Sprint(rf.me, "号机器开始发送心跳给", i, "号机器, 任期为 ", rf.Term, "  req为", fmt.Sprintf("%+v %s", *args, logPrint)))
 			if flag := rf.sendRPCAppendEntriesRequest(i, args, reply); !flag {
 				//  网络原因，需要重发
@@ -504,6 +496,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 
 	// 如果自己日志的此下标没有，或者任期和预期的不一样，返回false
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	// todo 偶现 TestSnapshotInstall2D panic 越界 index 为负数
 	if req.PrevLogIndex != 0+rf.LastIncludedIndex && (len(rf.Log)+rf.LastIncludedIndex < req.PrevLogIndex || rf.Log[req.PrevLogIndex-1-rf.LastIncludedIndex].Term != req.PrevLogTerm) {
 		// 找一下最后匹配到哪一个了，不然服务端不停的-1重试导致超时
 		reply.MatchIndex = rf.CommitIndex
@@ -547,7 +540,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 		rf.CommitIndex = MathMin(req.LeaderCommitIndex, rf.Log[len(rf.Log)-1].Index)
 	}
 
-	util.Trace(fmt.Sprint(rf.me, "机器收到", req.ServerNumber, "的心跳", ",commitIndex是否更新", commitIndexUpdate, ",值从", oldCommitIndex, "变为", rf.CommitIndex, fmt.Sprintf(" reply:%+v Log:%+v", *reply, rf.Log)))
+	//util.Trace(fmt.Sprint(rf.me, "机器收到", req.ServerNumber, "的心跳", ",commitIndex是否更新", commitIndexUpdate, ",值从", oldCommitIndex, "变为", rf.CommitIndex, fmt.Sprintf(" reply:%+v Log:%+v", *reply, rf.Log)))
 	if commitIndexUpdate {
 		// 当 CommitIndex 更新时，相当于提交，需要给检测程序发送
 		for i := oldCommitIndex; i <= rf.CommitIndex-1; i++ {
@@ -602,7 +595,7 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 		rf.CommitIndex = n
 		commitFlag = true
 	}
-	fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  心跳成功返回~~~", rf.me, "号机器发送心跳给", reply.ServerNumber, "号机器成功, 任期为 ", rf.Term, " success:", reply.Success, " follower是否有日志复制", reply.HasReplica, " 是否可以提交本条日志:", commitFlag, "  最大提交CommitIndex从", oldCommitIndex, "变为", rf.CommitIndex)
+	//fmt.Println(time.Now().Format("2006/01/02 15:04:05.000"), "  心跳成功返回~~~", rf.me, "号机器发送心跳给", reply.ServerNumber, "号机器成功, 任期为 ", rf.Term, " success:", reply.Success, " follower是否有日志复制", reply.HasReplica, " 是否可以提交本条日志:", commitFlag, "  最大提交CommitIndex从", oldCommitIndex, "变为", rf.CommitIndex)
 	if commitFlag {
 		// 可能一次性提交多个，所以不能依赖 req 中的 entry。从上次提交到本次提交之间的log，进行提交
 		for i := oldCommitIndex; i < rf.CommitIndex; i++ {
@@ -620,7 +613,6 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 
 // 转换为 follower 用的
 func (rf *Raft) convert2Follower(term int64) {
-	//oldRole := rf.Role
 	rf.Role = RoleFollower
 	rf.Term = term
 	rf.VotedFor = InitVoteFor
@@ -809,7 +801,6 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		select {
-		// todo 心跳的循环时间和任期的循环时间不一样，后者大一些
 		// 先不考虑 rpc 的超时控制，因为 sendRequestVote 说自己考虑过了。
 		case <-rf.RequestVoteTimeTicker.C:
 			// 时间到了

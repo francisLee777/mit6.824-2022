@@ -120,11 +120,6 @@ func (m *Coordinator) JobFetch(req *JobFetchReq, resp *JobFetchResp) error {
 
 // JobDone 客户端提交任务的处理函数
 func (m *Coordinator) JobDone(req *JobDoneReq, resp *JobDoneResp) error {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("Recovered:", r)
-		}
-	}()
 	m.JobListMutex.Lock()
 	defer m.JobListMutex.Unlock()
 	finished := req.JobFinished
@@ -135,7 +130,7 @@ func (m *Coordinator) JobDone(req *JobDoneReq, resp *JobDoneResp) error {
 	fmt.Printf(logTime()+MasterLogPrefix+"—————————————— 完成%s任务耗时:%v 毫秒[从第一次被分发], %v毫秒[最近一次]，分配次数%v —————————————— \n",
 		jobType, time.Now().UnixMilli()-req.FirstStartTime, time.Now().UnixMilli()-req.StartTime, req.FetchCount)
 	switch m.CurrentStates {
-	// 将任务的状态改为status，后台定时线程会扫描此状态
+	// 将任务的状态改为是否已完成，后台定时线程会扫描此状态
 	case InMap:
 		m.MapJobList[req.ListIndex].JobFinished = finished
 	case InReduce:
@@ -201,7 +196,7 @@ func (m *Coordinator) generateReduceMap() {
 	fmt.Printf(MasterLogPrefix+" generateReduceMap finished,m.ReduceJobList: %+v\n", toJsonString(reduceJobList))
 }
 
-// 序列化一个结构体对象
+// 序列化一个结构体对象, 打印日志时候用
 func toJsonString(inter interface{}) string {
 	bytes, _ := json.Marshal(inter)
 	return string(bytes)

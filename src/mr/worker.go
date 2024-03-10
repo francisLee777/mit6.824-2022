@@ -18,14 +18,15 @@ type JobFetchReq struct {
 	// 不需要有东西。如果服务端需要记录客户端信息，可以传入客户端id等信息，微服务mesh层应该做的事情。
 }
 
+// JobFetchResp 获取任务的返回体
 type JobFetchResp struct {
 	NeedWait bool // 是否需要等待下次轮询任务， 因为服务端可能已经分发完map任务，但Map阶段还没结束[map任务正在被执行]
-	Job           // 继承写法
+	Job           // 继承写法,相当于把Job里面的所有属性写到这里
 }
 
 // JobDoneReq 任务完成提交的请求体
 type JobDoneReq struct {
-	Job // 继承写法
+	Job // 继承写法,相当于把Job里面的所有属性写到这里
 }
 
 // JobDoneResp 任务完成提交的返回体
@@ -82,12 +83,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-}
-
-func CallCommitJob(job *JobDoneReq) {
-	//fmt.Printf(WorkerLogPrefix+"CallCommitJob job req %+v\n", *job)
-	resp := JobDoneResp{}
-	call("Coordinator.JobDone", job, &resp)
 }
 
 // DoJob 开始工作
@@ -248,12 +243,17 @@ func logTime() string {
 }
 
 func CallFetchJob() JobFetchResp {
-	// 兜住 panic， 因为 call
 	req := JobFetchReq{}
 	resp := JobFetchResp{}
 	call("Coordinator.JobFetch", &req, &resp)
 	//fmt.Printf(WorkerLogPrefix+"CallFetchJob job resp %+v\n", resp)
 	return resp
+}
+
+func CallCommitJob(job *JobDoneReq) {
+	//fmt.Printf(WorkerLogPrefix+"CallCommitJob job req %+v\n", *job)
+	resp := JobDoneResp{}
+	call("Coordinator.JobDone", job, &resp)
 }
 
 // example function to show how to make an RPC call to the coordinator.
@@ -289,7 +289,7 @@ func CallExample() {
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("127.0.0.1:6789", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}

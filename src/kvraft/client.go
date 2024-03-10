@@ -1,9 +1,12 @@
 package kvraft
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"6.824/util"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -37,9 +40,34 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	return ck.CommonOp(key, "", "Get")
+}
+
+func (ck *Clerk) CommonOp(key string, value string, op string) string {
+	seqId := nrand()
+	for {
+		for i, server := range ck.servers {
+			req := &CommonRequest{
+				Key:   key,
+				Value: value,
+				Op:    op,
+				SeqId: seqId,
+			}
+			resp := &CommonResponse{}
+			if b := server.Call("KVServer.CommonOp", req, resp); !b {
+				util.Warning("请求 %v 服务端失败", i)
+				continue
+			}
+			if resp.Err == ErrWrongLeader || resp.Err == ErrFailed {
+				continue
+			} else {
+				return resp.Value
+			}
+		}
+		// 一轮循环过后，如果还是没有返回，则等待后再发起请求
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 //
@@ -57,8 +85,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.CommonOp(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.CommonOp(key, value, "Append")
 }

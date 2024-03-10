@@ -3,6 +3,7 @@ package kvraft
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
+	ErrFailed      = "Failed" // 操作失败，往往是Raft内部丢弃了未提交的日志
 	ErrWrongLeader = "ErrWrongLeader"
 )
 
@@ -28,6 +29,18 @@ type GetArgs struct {
 }
 
 type GetReply struct {
+	Err   Err
+	Value string
+}
+
+type CommonRequest struct {
+	Key   string
+	Value string
+	Op    string // "Put" or "Append" or "Get"
+	SeqId int64
+}
+
+type CommonResponse struct {
 	Err   Err
 	Value string
 }
