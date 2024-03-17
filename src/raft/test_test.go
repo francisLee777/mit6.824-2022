@@ -184,7 +184,7 @@ func TestRPCBytes2B(t *testing.T) {
 //
 // test just failure of followers.
 //
-func For2023TestFollowerFailure2B(t *testing.T) {
+func TestFor2023TestFollowerFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -648,6 +648,7 @@ loop:
 				failed = true
 			}
 			total2 += cfg.rpcCount(j)
+			fmt.Println(j, "号机器，total2 本次:", cfg.rpcCount(j))
 		}
 
 		if failed {
@@ -671,6 +672,7 @@ loop:
 	total3 := 0
 	for j := 0; j < servers; j++ {
 		total3 += cfg.rpcCount(j)
+		fmt.Println(j, "号机器，total3 本次:", cfg.rpcCount(j))
 	}
 
 	if total3-total2 > 3*20 {

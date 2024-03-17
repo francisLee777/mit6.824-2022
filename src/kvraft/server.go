@@ -162,9 +162,8 @@ func (kv *KVServer) BackGround() {
 				}
 			}
 			// 如果日志太多，超过了参数, 需要做一次快照，保存到持久化里面
-			if kv.maxraftstate != -1 && kv.persister.SnapshotSize() > kv.maxraftstate {
-				//kv.rf.Snapshot()
-			}
+			//if kv.maxraftstate != -1 && len(kv.persister.ReadRaftState()) > kv.maxraftstate {
+			//}
 			kv.mu.Unlock()
 		}
 	}

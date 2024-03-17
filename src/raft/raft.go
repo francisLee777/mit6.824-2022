@@ -97,8 +97,8 @@ const (
 	RoleLeader              = 3
 	InitVoteFor             = -1                     // 初始化投票为空
 	InitTerm                = 1                      // 初始化任期
-	BaseRPCCyclePeriod      = 20 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~ RPCRandomPeriod 毫秒的随机值
-	BaseElectionCyclePeriod = 200 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~ ElectionRandomPeriod 毫秒的随机值
+	BaseRPCCyclePeriod      = 40 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~ RPCRandomPeriod 毫秒的随机值
+	BaseElectionCyclePeriod = 300 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~ ElectionRandomPeriod 毫秒的随机值
 
 	RPCRandomPeriod      = 10
 	ElectionRandomPeriod = 100
@@ -247,7 +247,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	// index参数是当前CommandIndex， snapShot是从0到CommandIndex之间的日志
-	// todo 是否需要删除或者编辑上次保存的snapshot
 	// 实验有提示，不让加锁
 	if index <= rf.LastIncludedIndex {
 		return
@@ -257,7 +256,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.LastIncludedTerm = rf.Log[index-1-rf.LastIncludedIndex].Term
 	rf.Log = rf.Log[index-rf.LastIncludedIndex:]
 	rf.LastIncludedIndex = index
-
 	// 先保存到 state 中，再保存 snapShot
 	rf.persist()
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
@@ -321,7 +319,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.RequestVoteTimeTicker.Reset(rf.RequestVoteDuration)
 		}
 	}
-	fmt.Println(" 结果是:", reply.Agree, " logOld:", logOld, "log:", fmt.Sprintf("%+v", rf.Log))
+	//fmt.Println(" 结果是:", reply.Agree, " logOld:", logOld, "log:", fmt.Sprintf("%+v", rf.Log))
 }
 
 // AsyncBatchSendRequestVote 非领导者并行发送投票请求，收到响应后进行处理
@@ -375,6 +373,7 @@ func (rf *Raft) HandleRequestVoteResp(req *RequestVoteArgs, reply *RequestVoteRe
 			// 之后心跳如果被拒绝，ld会将对应跟随者的NextIndex递减并重发appendEntries请求，这个过程会不断重复直到找到两者日志一致的点
 			for i := range rf.NextIndex {
 				rf.NextIndex[i] = len(rf.Log) + 1 + rf.LastIncludedIndex
+				rf.MatchIndex[i] = 0
 			}
 			util.Success(fmt.Sprint(time.Now().Format("2006/01/02 15:04:05.000"), "  ", rf.me, "号机器升级成 leader,任期为", rf.Term))
 			//  根据论文，应该立马添加一个 no-op 日志。因为论文图 8 说明即使某日志被复制到多数节点也不代表它被提交。但这里不需要添加，否则检测不过
@@ -501,7 +500,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 		// 找一下最后匹配到哪一个了，不然服务端不停的-1重试导致超时
 		reply.MatchIndex = rf.CommitIndex
 		reply.Success = false
-		util.Warning(fmt.Sprint(rf.me, "机器收到", req.ServerNumber, "的心跳【发生日志冲突】", " CommitIndex:", rf.CommitIndex, fmt.Sprintf(" req:%+v reply:%+v Log:%+v", *req, *reply, rf.Log)))
+		//util.Warning(fmt.Sprint(rf.me, "机器收到", req.ServerNumber, "的心跳【发生日志冲突】", " CommitIndex:", rf.CommitIndex, fmt.Sprintf(" req:%+v reply:%+v Log:%+v", *req, *reply, rf.Log)))
 		return
 	}
 
@@ -568,7 +567,6 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 	if rf.Role != RoleLeader {
 		return
 	}
-	// todo   rf.Term > reply.Term
 	// 日志复制返回成功
 	if reply.Success {
 		rf.MatchIndex[reply.ServerNumber] = MathMax(reply.MatchIndex, rf.MatchIndex[reply.ServerNumber])
@@ -578,10 +576,10 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 		oldNextIndex := rf.NextIndex[reply.ServerNumber]
 		// 下面是普通的情况，但需要优化。因为如果落下的很多，那么尝试对齐的次数太多导致长期达不到一致，导致测试TestFigure8Unreliable2C不通过
 		//rf.NextIndex[reply.ServerNumber] = MathMax(1, rf.NextIndex[reply.ServerNumber]-1)
-		rf.NextIndex[reply.ServerNumber] = MathMax(1, reply.MatchIndex)
+		rf.NextIndex[reply.ServerNumber] = MathMax(1, reply.MatchIndex+1)
 		util.Warning(fmt.Sprint(rf.me, "号ld减少%d号机器的nextIndex从", oldNextIndex, "到", rf.NextIndex[reply.ServerNumber], " reply.MatchIndex:", reply.MatchIndex), reply.ServerNumber)
 	}
-	// todo 所以新上任的 Leader 在接受客户写入命令前先提交一个 no-op（空命令），携带自己任期号的多数节点
+	// todo 所以新上任的 Leader 在接受客户写入命令前先提交一个 no-op（空命令），携带自己任期号的多数节点。本实验中不需要实现
 	// 论文图 8 说明即使某日志被复制到多数节点也不代表它被提交。 所以 Raft 对日志提交条件增加一个额外限制：Leader 在至少有一条当前任期的日志被复制到大多数节点上。
 	commitFlag := false
 	oldCommitIndex := rf.CommitIndex
@@ -607,8 +605,6 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 			rf.LastApplied = rf.CommitIndex
 		}
 	}
-	// todo 需要吗？
-	rf.RequestAppendEntriesTimeTicker.Reset(rf.RequestAppendEntriesDuration)
 }
 
 // 转换为 follower 用的
@@ -768,7 +764,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    rf.Term,
 		ID:      atomic.AddInt64(&GlobalID, 1),
 	})
-	util.Success(fmt.Sprint(rf.me, "号leader机器添加一个日志", fmt.Sprintf("%+v", rf.Log), " commitIndex为", rf.CommitIndex))
+	//util.Success(fmt.Sprint(rf.me, "号leader机器添加一个日志", fmt.Sprintf("%+v", rf.Log), " commitIndex为", rf.CommitIndex))
 	//time.Sleep(30 * time.Millisecond)
 	rf.persist()
 	return len(rf.Log) + rf.LastIncludedIndex, int(rf.Term), rf.Role == RoleLeader

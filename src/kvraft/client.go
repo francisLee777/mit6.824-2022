@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"6.824/labrpc"
-	"6.824/util"
 	"time"
 )
 import "crypto/rand"
@@ -47,7 +46,7 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) CommonOp(key string, value string, op string) string {
 	seqId := nrand()
 	for {
-		for i, server := range ck.servers {
+		for _, server := range ck.servers {
 			req := &CommonRequest{
 				Key:   key,
 				Value: value,
@@ -56,9 +55,10 @@ func (ck *Clerk) CommonOp(key string, value string, op string) string {
 			}
 			resp := &CommonResponse{}
 			if b := server.Call("KVServer.CommonOp", req, resp); !b {
-				util.Warning("请求 %v 服务端失败", i)
+				//  网络错误   util.Warning("请求 %v 服务端失败", i)
 				continue
 			}
+			// 不是leader  或者是 raft 内部有日志冲突丢弃的情况
 			if resp.Err == ErrWrongLeader || resp.Err == ErrFailed {
 				continue
 			} else {
