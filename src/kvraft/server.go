@@ -24,10 +24,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpType string
-	Key    string
-	Value  string
-	SeqId  int64
+	OpType   string
+	Key      string
+	Value    string
+	SeqId    int64
+	ClientID int64
 }
 
 type KVServer struct {
@@ -40,17 +41,18 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap     map[string]string  // kv数据库，用 map 简单表示
-	seqMap    map[int64]struct{} // 请求幂等性, key是时间纳秒
-	persister *raft.Persister    // 持久化功能，因为 rf 里面的那个是小写的，导致包外取不到
+	kvMap     map[string]string // kv数据库，用 map 简单表示
+	seqMap    map[int64]int64   // 请求幂等性, key是 clientID , value 是最后一个请求的Id
+	persister *raft.Persister   // 持久化功能，因为 rf 里面的那个是小写的，导致包外取不到
 }
 
 func (kv *KVServer) CommonOp(req *CommonRequest, resp *CommonResponse) {
 	op := Op{
-		SeqId:  req.SeqId,
-		OpType: req.Op,
-		Key:    req.Key,
-		Value:  req.Value,
+		SeqId:    req.SeqId,
+		OpType:   req.Op,
+		Key:      req.Key,
+		Value:    req.Value,
+		ClientID: req.ClientID,
 	}
 	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
@@ -61,7 +63,7 @@ func (kv *KVServer) CommonOp(req *CommonRequest, resp *CommonResponse) {
 	kv.mu.Lock()
 	// 这里可以用超时
 	for i := 0; i < 400; i++ {
-		if _, ok := kv.seqMap[op.SeqId]; !ok {
+		if kv.seqMap[op.ClientID] != op.SeqId {
 			kv.mu.Unlock()
 			time.Sleep(5 * time.Millisecond)
 			kv.mu.Lock()
@@ -136,7 +138,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.seqMap = make(map[int64]struct{})
+	kv.seqMap = make(map[int64]int64)
 	kv.persister = persister
 	go kv.BackGround()
 	return kv
@@ -150,8 +152,8 @@ func (kv *KVServer) BackGround() {
 			op := applyMsg.Command.(Op)
 			kv.mu.Lock()
 			// 幂等性
-			if _, ok := kv.seqMap[op.SeqId]; !ok {
-				kv.seqMap[op.SeqId] = struct{}{}
+			if op.SeqId > kv.seqMap[op.ClientID] {
+				kv.seqMap[op.ClientID] = op.SeqId
 				switch op.OpType {
 				case "Put":
 					kv.kvMap[op.Key] = op.Value

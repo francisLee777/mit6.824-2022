@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"6.824/labrpc"
+	"sync/atomic"
 	"time"
 )
 import "crypto/rand"
@@ -10,6 +11,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientID  int64
+	lastSeqID int64
 }
 
 func nrand() int64 {
@@ -23,6 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientID = nrand()
 	return ck
 }
 
@@ -44,14 +48,15 @@ func (ck *Clerk) Get(key string) string {
 }
 
 func (ck *Clerk) CommonOp(key string, value string, op string) string {
-	seqId := nrand()
+	seqId := atomic.AddInt64(&ck.lastSeqID, 1)
 	for {
 		for _, server := range ck.servers {
 			req := &CommonRequest{
-				Key:   key,
-				Value: value,
-				Op:    op,
-				SeqId: seqId,
+				Key:      key,
+				Value:    value,
+				Op:       op,
+				SeqId:    seqId,
+				ClientID: ck.clientID,
 			}
 			resp := &CommonResponse{}
 			if b := server.Call("KVServer.CommonOp", req, resp); !b {

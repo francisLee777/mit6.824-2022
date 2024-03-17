@@ -34,10 +34,11 @@ type GetReply struct {
 }
 
 type CommonRequest struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append" or "Get"
-	SeqId int64
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append" or "Get"
+	SeqId    int64  // 递增的
+	ClientID int64
 }
 
 type CommonResponse struct {
