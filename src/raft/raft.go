@@ -97,8 +97,8 @@ const (
 	RoleLeader              = 3
 	InitVoteFor             = -1                     // 初始化投票为空
 	InitTerm                = 1                      // 初始化任期
-	BaseRPCCyclePeriod      = 40 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~ RPCRandomPeriod 毫秒的随机值
-	BaseElectionCyclePeriod = 300 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~ ElectionRandomPeriod 毫秒的随机值
+	BaseRPCCyclePeriod      = 20 * time.Millisecond  // 一轮周期基线，每个实例在这个基础上新增 0~ RPCRandomPeriod 毫秒的随机值
+	BaseElectionCyclePeriod = 200 * time.Millisecond // 一轮周期基线，每个实例在这个基础上新增 0~ ElectionRandomPeriod 毫秒的随机值
 
 	RPCRandomPeriod      = 10
 	ElectionRandomPeriod = 100
