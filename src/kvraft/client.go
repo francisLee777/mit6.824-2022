@@ -3,7 +3,6 @@ package kvraft
 import (
 	"6.824/labrpc"
 	"sync/atomic"
-	"time"
 )
 import "crypto/rand"
 import "math/big"
@@ -11,8 +10,9 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	clientID  int64
-	lastSeqID int64
+	clientID      int64
+	lastSeqID     int64
+	currentLeader int64 // 保存一下当前leader，减少每次的轮询。
 }
 
 func nrand() int64 {
@@ -50,28 +50,21 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) CommonOp(key string, value string, op string) string {
 	seqId := atomic.AddInt64(&ck.lastSeqID, 1)
 	for {
-		for _, server := range ck.servers {
-			req := &CommonRequest{
-				Key:      key,
-				Value:    value,
-				Op:       op,
-				SeqId:    seqId,
-				ClientID: ck.clientID,
-			}
-			resp := &CommonResponse{}
-			if b := server.Call("KVServer.CommonOp", req, resp); !b {
-				//  网络错误   util.Warning("请求 %v 服务端失败", i)
-				continue
-			}
-			// 不是leader  或者是 raft 内部有日志冲突丢弃的情况
-			if resp.Err == ErrWrongLeader || resp.Err == ErrFailed {
-				continue
-			} else {
-				return resp.Value
-			}
+		req := &CommonRequest{
+			Key:      key,
+			Value:    value,
+			Op:       op,
+			SeqId:    seqId,
+			ClientID: ck.clientID,
 		}
-		// 一轮循环过后，如果还是没有返回，则等待后再发起请求
-		time.Sleep(50 * time.Millisecond)
+		resp := &CommonResponse{}
+		if b := ck.servers[ck.currentLeader].Call("KVServer.CommonOp", req, resp); !b || resp.Err == ErrWrongLeader || resp.Err == ErrFailed {
+			ck.currentLeader = (ck.currentLeader + 1) % int64(len(ck.servers))
+			//time.Sleep(30 * time.Millisecond)
+			//atomic.AddInt64(&ck.lastSeqID, 1)
+			continue
+		}
+		return resp.Value
 	}
 }
 

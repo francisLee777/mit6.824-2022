@@ -41,12 +41,23 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap     map[string]string // kv数据库，用 map 简单表示
-	seqMap    map[int64]int64   // 请求幂等性, key是 clientID , value 是最后一个请求的Id
-	persister *raft.Persister   // 持久化功能，因为 rf 里面的那个是小写的，导致包外取不到
+	kvMap         map[string]string           // kv数据库，用 map 简单表示
+	lastSeqMap    map[int64]int64             // 请求幂等性, key是 clientID , value 是最后一个请求的Id
+	lastResultMap map[int64]string            // 请求幂等性, key是 clientID , value 是最后一个请求对应的结果
+	chanMap       map[int]chan CommonResponse // 使用管道，在异步 applyCh 线程 和 处理客户端请求线程 之间传输结果
+	//persister *raft.Persister   // 持久化功能，因为 rf 里面的那个是小写的，导致包外取不到
 }
 
 func (kv *KVServer) CommonOp(req *CommonRequest, resp *CommonResponse) {
+	kv.mu.Lock()
+	if kv.lastSeqMap[req.ClientID] == req.SeqId {
+		util.Warning("出现了幂等")
+		resp.Value = kv.lastResultMap[req.ClientID]
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
 	op := Op{
 		SeqId:    req.SeqId,
 		OpType:   req.Op,
@@ -54,29 +65,35 @@ func (kv *KVServer) CommonOp(req *CommonRequest, resp *CommonResponse) {
 		Value:    req.Value,
 		ClientID: req.ClientID,
 	}
-	_, _, isLeader := kv.rf.Start(op)
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		// 不是leader，直接返回
 		resp.Err = ErrWrongLeader
 		return
 	}
+	ch := make(chan CommonResponse, 1)
 	kv.mu.Lock()
-	// 这里可以用超时
-	for i := 0; i < 400; i++ {
-		if kv.seqMap[op.ClientID] != op.SeqId {
-			kv.mu.Unlock()
-			time.Sleep(5 * time.Millisecond)
-			kv.mu.Lock()
-		} else {
-			resp.Value = kv.kvMap[op.Key]
-			kv.mu.Unlock()
-			//fmt.Printf("%v机器操作返回 %+v\n", kv.me, *resp)
-			return
-		}
-	}
-	util.Error("操作超时！！！  %+v", *req)
-	resp.Err = ErrFailed
+	kv.chanMap[index] = ch
 	kv.mu.Unlock()
+	// 等待 applyCh 结果
+	select {
+	case result := <-ch:
+		resp.Value = result.Value
+		//resp.Err = result.Err
+	case <-time.After(1 * time.Second): // 超时，防止死锁
+		util.Error("%d号server操作超时！！！  %+v", kv.me, *req)
+		resp.Err = ErrFailed
+	}
+	// 清理 channel
+	kv.mu.Lock()
+	delete(kv.chanMap, index)
+	kv.mu.Unlock()
+	// 要保证返回的时候是 leader
+	if _, isLeader = kv.rf.GetState(); !isLeader {
+		resp.Err = ErrFailed
+		return
+	}
+	util.Success("%d号server返回  index: %v req:%+v resp:%v", kv.me, index, *req, *resp)
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -138,35 +155,56 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvMap = make(map[string]string)
-	kv.seqMap = make(map[int64]int64)
-	kv.persister = persister
+	kv.chanMap = make(map[int]chan CommonResponse)
+	kv.lastSeqMap = make(map[int64]int64)
+	kv.lastResultMap = make(map[int64]string)
 	go kv.BackGround()
 	return kv
 }
 
 func (kv *KVServer) BackGround() {
-	for {
-		select {
-		case applyMsg := <-kv.applyCh:
-			// CommandValid 不用判断
-			op := applyMsg.Command.(Op)
-			kv.mu.Lock()
-			// 幂等性
-			if op.SeqId > kv.seqMap[op.ClientID] {
-				kv.seqMap[op.ClientID] = op.SeqId
-				switch op.OpType {
-				case "Put":
-					kv.kvMap[op.Key] = op.Value
-				case "Append":
-					kv.kvMap[op.Key] += op.Value
-				default:
-					// get 不需要管
-				}
-			}
-			// 如果日志太多，超过了参数, 需要做一次快照，保存到持久化里面
-			//if kv.maxraftstate != -1 && len(kv.persister.ReadRaftState()) > kv.maxraftstate {
-			//}
+	// 当raft层成功时，通知应用层可以返回了
+	for applyMsg := range kv.applyCh {
+
+		kv.mu.Lock()
+		op := applyMsg.Command.(Op)
+		// 幂等
+		if kv.lastSeqMap[op.ClientID] == op.SeqId {
+			util.Warning("%v号机器发生幂等 req:%+v", kv.me, applyMsg)
 			kv.mu.Unlock()
+			continue
 		}
+		// 执行命令
+		var reply CommonResponse
+		if op.OpType == "Put" {
+			kv.kvMap[op.Key] = op.Value
+		} else if op.OpType == "Append" {
+			kv.kvMap[op.Key] += op.Value
+		} else if op.OpType == "Get" {
+			reply.Value = kv.kvMap[op.Key]
+		} else {
+			util.Error("未知的操作类型")
+		}
+
+		// 记录结果，防止重复执行
+		kv.lastSeqMap[op.ClientID] = op.SeqId
+		kv.lastResultMap[op.ClientID] = kv.kvMap[op.Key]
+		util.Trace("%v号server落库 index:%v %+v", kv.me, applyMsg.CommandIndex, applyMsg)
+
+		// 如果有等待的 channel，则通知
+		if ch, exists := kv.chanMap[applyMsg.CommandIndex]; exists {
+			if currentTerm, isLeader := kv.rf.GetState(); isLeader && int(applyMsg.CommandTerm) == currentTerm {
+				ch <- reply
+				delete(kv.chanMap, applyMsg.CommandIndex) // 清理 channel
+			} else {
+				util.Info("不是leader了，不要返回给客户端了 %+v", applyMsg)
+			}
+		}
+		// 如果日志太多，超过了参数, 需要做一次快照，保存到持久化里面
+		//if kv.maxraftstate != -1 && kv.rf.GetCurrentLogSize() > kv.maxraftstate {
+		//	kv.rf.Snapshot(kv.rf.LastApplied, []byte(""))
+		//	util.Warning("做了快照")
+		//}
+		kv.mu.Unlock()
 	}
 }

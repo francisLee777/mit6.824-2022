@@ -47,6 +47,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int64
 
 	// For 2D:
 	SnapshotValid bool
@@ -480,12 +481,15 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 	// 1. Reply false if term < currentTerm (§5.1)
 	if rf.Term > req.Term {
 		// 源leader任期更小，说明老leader过期了，告诉他自己的任期
-		util.Error("源leader编号%d任期更小 请求任期 %d 自己的任期 %d, 直接返回", req.ServerNumber, req.Term, rf.Term)
+		util.Error("收到心跳，但源leader编号%d任期更小 请求任期 %d 自己的任期 %d, 直接返回", req.ServerNumber, req.Term, rf.Term)
 		reply.Success = false
 		return
 	}
 	// 源leader的任期比自己大，说明自己的任期落后了，需要更新
 	if rf.Term < req.Term {
+		if rf.Role == RoleLeader {
+			util.Warning(fmt.Sprint(" 收到心跳的任期大于自己的，立刻重置自己的任期和计时器, 并降级为 follower", rf.me, "号机器，任期为 ", rf.Term, " 响应任期为", reply.Term))
+		}
 		rf.convert2Follower(req.Term)
 	}
 	// 之后一定是  req.Term == rf.Term
@@ -511,7 +515,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 	for _, pojo := range req.Entries {
 		reply.MatchIndex += 1
 		for len(rf.Log)+rf.LastIncludedIndex >= pojo.Index && rf.Log[pojo.Index-1-rf.LastIncludedIndex].Term != pojo.Term {
-			util.Warning(fmt.Sprint(rf.me, "机器丢弃日志，因为ld心跳中的日志", ",值为", rf.CommitIndex, fmt.Sprintf(" reply:%+v 丢弃的Log是%+v", *reply, rf.Log[pojo.Index-1-rf.LastIncludedIndex])))
+			util.Warning(fmt.Sprint(rf.me, "机器丢弃日志，因为ld心跳中的日志比自己更新", ",index为", pojo.Index, fmt.Sprintf(" reply:%+v 丢弃的Log是%+v", *reply, rf.Log[pojo.Index-1-rf.LastIncludedIndex])))
 			rf.Log = rf.Log[:pojo.Index-1-rf.LastIncludedIndex]
 		}
 	}
@@ -545,6 +549,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRequest, reply *AppendEntriesRep
 		for i := oldCommitIndex; i <= rf.CommitIndex-1; i++ {
 			rf.ApplyCh <- ApplyMsg{
 				CommandValid: true,
+				CommandTerm:  rf.Term,
 				Command:      rf.Log[i-rf.LastIncludedIndex].Command,
 				CommandIndex: rf.Log[i-rf.LastIncludedIndex].Index,
 			}
@@ -599,6 +604,7 @@ func (rf *Raft) HandleAppendEntriesResp(args *AppendEntriesRequest, reply *Appen
 		for i := oldCommitIndex; i < rf.CommitIndex; i++ {
 			rf.ApplyCh <- ApplyMsg{
 				CommandValid: true,
+				CommandTerm:  rf.Term,
 				Command:      rf.Log[i-rf.LastIncludedIndex].Command,
 				CommandIndex: rf.Log[i-rf.LastIncludedIndex].Index,
 			}
@@ -825,6 +831,10 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		}
 	}
+}
+
+func (rf *Raft) GetCurrentLogSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 // the service or tester wants to create a Raft server. the ports
