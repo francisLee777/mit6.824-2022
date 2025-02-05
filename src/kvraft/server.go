@@ -5,6 +5,7 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 	"6.824/util"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -158,6 +159,20 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.chanMap = make(map[int]chan CommonResponse)
 	kv.lastSeqMap = make(map[int64]int64)
 	kv.lastResultMap = make(map[int64]string)
+	// 恢复数据
+	if persister.SnapshotSize() > 0 {
+		r := bytes.NewBuffer(persister.ReadSnapshot())
+		d := labgob.NewDecoder(r)
+		if err := d.Decode(&kv.kvMap); err != nil {
+			panic("Decode失败 kvMap" + err.Error())
+		}
+		if err := d.Decode(&kv.lastSeqMap); err != nil {
+			panic("Decode失败 lastSeqMap" + err.Error())
+		}
+		if err := d.Decode(&kv.lastResultMap); err != nil {
+			panic("Decode失败 lastResultMap" + err.Error())
+		}
+	}
 	go kv.BackGround()
 	return kv
 }
@@ -165,7 +180,23 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) BackGround() {
 	// 当raft层成功时，通知应用层可以返回了
 	for applyMsg := range kv.applyCh {
-
+		// 是快照，还是普通的日志，区分处理
+		if applyMsg.SnapshotValid && len(applyMsg.Snapshot) != 0 {
+			kv.mu.Lock()
+			r := bytes.NewBuffer(applyMsg.Snapshot)
+			d := labgob.NewDecoder(r)
+			if err := d.Decode(&kv.kvMap); err != nil {
+				panic("Decode失败 kvMap" + err.Error())
+			}
+			if err := d.Decode(&kv.lastSeqMap); err != nil {
+				panic("Decode失败 lastSeqMap" + err.Error())
+			}
+			if err := d.Decode(&kv.lastResultMap); err != nil {
+				panic("Decode失败 lastResultMap" + err.Error())
+			}
+			kv.mu.Unlock()
+			return
+		}
 		kv.mu.Lock()
 		op := applyMsg.Command.(Op)
 		// 幂等
@@ -189,22 +220,34 @@ func (kv *KVServer) BackGround() {
 		// 记录结果，防止重复执行
 		kv.lastSeqMap[op.ClientID] = op.SeqId
 		kv.lastResultMap[op.ClientID] = kv.kvMap[op.Key]
-		util.Trace("%v号server落库 index:%v %+v", kv.me, applyMsg.CommandIndex, applyMsg)
-
+		//util.Trace("%v号server落库 index:%v %+v", kv.me, applyMsg.CommandIndex, applyMsg)
+		tempLd := false
 		// 如果有等待的 channel，则通知
 		if ch, exists := kv.chanMap[applyMsg.CommandIndex]; exists {
 			if currentTerm, isLeader := kv.rf.GetState(); isLeader && int(applyMsg.CommandTerm) == currentTerm {
+				tempLd = true
 				ch <- reply
 				delete(kv.chanMap, applyMsg.CommandIndex) // 清理 channel
 			} else {
 				util.Info("不是leader了，不要返回给客户端了 %+v", applyMsg)
 			}
 		}
-		// 如果日志太多，超过了参数, 需要做一次快照，保存到持久化里面
-		//if kv.maxraftstate != -1 && kv.rf.GetCurrentLogSize() > kv.maxraftstate {
-		//	kv.rf.Snapshot(kv.rf.LastApplied, []byte(""))
-		//	util.Warning("做了快照")
-		//}
 		kv.mu.Unlock()
+
+		// 如果日志太多，超过了参数, 需要做一次快照，保存到持久化里面
+		if kv.maxraftstate != -1 && kv.rf.GetCurrentLogSize() > kv.maxraftstate {
+			go func() {
+				kv.mu.Lock()
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				_ = e.Encode(kv.kvMap)
+				_ = e.Encode(kv.lastSeqMap)
+				_ = e.Encode(kv.lastResultMap)
+				data := w.Bytes()
+				kv.rf.Snapshot(applyMsg.CommandIndex, data)
+				util.Warning("%d号机器[是否ld:%v]做了快照 index:%v", kv.me, tempLd, applyMsg.CommandIndex)
+				kv.mu.Unlock()
+			}()
+		}
 	}
 }
